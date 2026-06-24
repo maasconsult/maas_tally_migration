@@ -1,33 +1,22 @@
-### Maas Tally Migration
+# MAAS Tally Migration
 
-Tally XML migration tools for ERPNext
+A Frappe/ERPNext app for importing Tally XML data into ERPNext.
 
-### Installation
+This app includes migration tooling for:
 
-You can install this app using the [bench](https://github.com/frappe/bench) CLI:
+- Tally masters
+- Chart of Accounts
+- Customers and Suppliers
+- Items, Warehouses, UOMs
+- Opening invoices
+- Opening stock
+- Opening journal entries
+- Daybook vouchers
 
-```bash
-cd $PATH_TO_YOUR_BENCH
-bench get-app $URL_OF_THIS_REPO --branch develop
-bench install-app maas_tally_migration
-```
+## License
 
-### Contributing
+MIT. See `license.txt`.
 
-This app uses `pre-commit` for code formatting and linting. Please [install pre-commit](https://pre-commit.com/#installation) and enable it for this repository:
+## Attribution
 
-```bash
-cd apps/maas_tally_migration
-pre-commit install
-```
-
-Pre-commit is configured to use the following tools for checking and formatting your code:
-
-- ruff
-- eslint
-- prettier
-- pyupgrade
-
-### License
-
-mit
+This project is based on the MIT-licensed `tally_migration` app originally published by Greycube Technologies. See `NOTICE.md`.

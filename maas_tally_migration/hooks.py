@@ -1,8 +1,8 @@
 app_name = "maas_tally_migration"
-app_title = "Maas Tally Migration"
-app_publisher = "Maas Consult Middle East Co"
+app_title = "MAAS Tally Migration"
+app_publisher = "MAAS Consult"
 app_description = "Tally XML migration tools for ERPNext"
-app_email = "github@maasconsult.co"
+app_email = "ajharnoor@gmail.com"
 app_license = "mit"
 
 # Apps
