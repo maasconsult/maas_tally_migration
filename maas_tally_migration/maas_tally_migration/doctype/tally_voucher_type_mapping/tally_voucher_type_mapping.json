@@ -1,0 +1,91 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "creation": "2026-06-24 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "tally_voucher_type",
+  "tally_persisted_view",
+  "column_break_1",
+  "erpnext_doctype",
+  "erpnext_voucher_type",
+  "import_with_inventory",
+  "is_return",
+  "enabled",
+  "notes"
+ ],
+ "fields": [
+  {
+   "fieldname": "tally_voucher_type",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Tally Voucher Type",
+   "reqd": 1
+  },
+  {
+   "fieldname": "tally_persisted_view",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Tally Persisted View",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "erpnext_doctype",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "ERPNext Document Type",
+   "options": "\nJournal Entry\nSales Invoice\nPurchase Invoice\nDelivery Note\nPurchase Receipt\nSales Order\nPurchase Order\nQuotation\nStock Entry",
+   "reqd": 1
+  },
+  {
+   "fieldname": "erpnext_voucher_type",
+   "fieldtype": "Data",
+   "label": "ERPNext Voucher Type / Purpose"
+  },
+  {
+   "default": "1",
+   "description": "When enabled, inventory rows from Tally will be imported into the mapped ERPNext transaction. Disable this when a Sales/Purchase voucher should be imported as an accounting-only Journal Entry.",
+   "fieldname": "import_with_inventory",
+   "fieldtype": "Check",
+   "label": "Import With Inventory"
+  },
+  {
+   "default": "0",
+   "description": "Marks return-style vouchers such as Credit Note or Debit Note. Sign handling will be added in Patch 2.",
+   "fieldname": "is_return",
+   "fieldtype": "Check",
+   "label": "Is Return"
+  },
+  {
+   "default": "1",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Enabled"
+  },
+  {
+   "fieldname": "notes",
+   "fieldtype": "Small Text",
+   "label": "Notes"
+  }
+ ],
+ "grid_page_length": 50,
+ "istable": 1,
+ "links": [],
+ "modified": "2026-06-24 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Maas Tally Migration",
+ "name": "Tally Voucher Type Mapping",
+ "owner": "Administrator",
+ "permissions": [],
+ "row_format": "Dynamic",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

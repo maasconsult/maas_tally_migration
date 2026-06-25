@@ -817,6 +817,31 @@ class TallyMigration(Document):
 
 			return rows
 
+		def get_payheads(collection):
+			rows = []
+
+			for payhead in collection.find_all("PAYHEAD"):
+				name = get_master_name(payhead)
+				if not name:
+					continue
+
+				rows.append(
+					{
+						"doctype": "Salary Component",
+						"salary_component": name,
+						"salary_component_abbr": name[:20],
+						"tally_name": name,
+						"parent": get_tag_text(payhead, "PARENT"),
+						"payhead_type": get_tag_text(payhead, "PAYHEADTYPE"),
+						"income_type": get_tag_text(payhead, "INCOMETYPE"),
+						"calculation_type": get_tag_text(payhead, "CALCULATIONTYPE"),
+						"attendance_type": get_tag_text(payhead, "ATTENDANCETYPE"),
+						"under": get_tag_text(payhead, "PARENT"),
+					}
+				)
+
+			return rows
+
 		def get_ledger_opening_balances(collection, customers, suppliers):
 			rows = []
 
@@ -1126,6 +1151,7 @@ class TallyMigration(Document):
 			warehouses = get_warehouses(collection)
 			employee_groups = get_employee_groups(collection)
 			employees = get_employees(collection)
+			payheads = get_payheads(collection)
 
 			self.publish("Process Master Data", _("Processing Opening Balances"), 6, 7)
 			ledger_opening_balances = get_ledger_opening_balances(collection, customers, suppliers)
@@ -1149,6 +1175,7 @@ class TallyMigration(Document):
 				"warehouses": warehouses,
 				"employee_groups": employee_groups,
 				"employees": employees,
+				"payheads": payheads,
 				"ledger_opening_balances": ledger_opening_balances,
 				"stock_items_enhanced": stock_items_enhanced,
 				"item_opening_balances": item_opening_balances,
@@ -1913,38 +1940,188 @@ class TallyMigration(Document):
 				except Exception:
 					self.log(item_doc)
 
+		def normalize_tally_date(value):
+			value = str(value or "").strip()
+
+			if len(value) == 8 and value.isdigit():
+				return value[:4] + "-" + value[4:6] + "-" + value[6:8]
+
+			return value or None
+
+		def create_departments_designations_employees(employee_groups_file_url, employees_file_url):
+			def ensure_department(department_name):
+				if not department_name:
+					return None
+
+				existing = frappe.db.get_value("Department", {"department_name": department_name}, "name")
+				if existing:
+					return existing
+
+				department = frappe.get_doc(
+					{
+						"doctype": "Department",
+						"department_name": department_name,
+						"company": self.erpnext_company,
+					}
+				)
+
+				try:
+					department.insert(ignore_permissions=True)
+					return department.name
+				except frappe.DuplicateEntryError:
+					return frappe.db.get_value("Department", {"department_name": department_name}, "name")
+				except Exception:
+					self.log(department)
+					return None
+
+			def ensure_designation(designation_name):
+				if not designation_name:
+					return None
+
+				if frappe.db.exists("Designation", designation_name):
+					return designation_name
+
+				designation = frappe.get_doc(
+					{
+						"doctype": "Designation",
+						"designation_name": designation_name,
+					}
+				)
+
+				try:
+					designation.insert(ignore_permissions=True)
+					return designation.name
+				except frappe.DuplicateEntryError:
+					return designation_name
+				except Exception:
+					self.log(designation)
+					return None
+
+			employees = load_processed_json(employees_file_url)
+			employee_groups = load_processed_json(employee_groups_file_url)
+
+			for row in employee_groups:
+				if row.get("tally_master_type") == "EMPLOYEEGROUP":
+					ensure_department(row.get("name"))
+
+			for row in employees:
+				employee_name = row.get("employee_name")
+				if not employee_name:
+					continue
+
+				department = ensure_department(row.get("department") or row.get("parent"))
+				designation = ensure_designation(row.get("designation"))
+
+				existing = frappe.db.get_value(
+					"Employee",
+					{
+						"employee_name": employee_name,
+						"company": self.erpnext_company,
+					},
+					"name",
+				)
+
+				if existing:
+					continue
+
+				employee_doc = frappe.get_doc(
+					{
+						"doctype": "Employee",
+						"employee_name": employee_name,
+						"first_name": employee_name,
+						"employee_number": row.get("employee_number"),
+						"company": self.erpnext_company,
+						"department": department,
+						"designation": designation,
+						"date_of_joining": normalize_tally_date(row.get("date_of_joining")),
+						"date_of_birth": normalize_tally_date(row.get("date_of_birth")),
+						"gender": row.get("gender"),
+						"pan_number": row.get("pan_number"),
+						"status": "Active",
+					}
+				)
+
+				try:
+					employee_doc.insert(ignore_permissions=True)
+				except frappe.DuplicateEntryError:
+					pass
+				except Exception:
+					self.log(employee_doc)
+
+		def create_salary_components_if_available(payheads_file_url):
+			if not frappe.db.exists("DocType", "Salary Component"):
+				return
+
+			payheads = load_processed_json(payheads_file_url)
+
+			for row in payheads:
+				salary_component = row.get("salary_component") or row.get("tally_name")
+				if not salary_component:
+					continue
+
+				if frappe.db.exists("Salary Component", salary_component):
+					continue
+
+				component_type = "Earning"
+				payhead_type = str(row.get("payhead_type") or "").lower()
+				income_type = str(row.get("income_type") or "").lower()
+
+				if "deduction" in payhead_type or "deduction" in income_type:
+					component_type = "Deduction"
+
+				component = frappe.get_doc(
+					{
+						"doctype": "Salary Component",
+						"salary_component": salary_component,
+						"salary_component_abbr": row.get("salary_component_abbr") or salary_component[:20],
+						"type": component_type,
+						"company": self.erpnext_company,
+					}
+				)
+
+				try:
+					component.insert(ignore_permissions=True)
+				except frappe.DuplicateEntryError:
+					pass
+				except Exception:
+					self.log(component)
+
 		try:
 			default_currency = get_default_currency()
 
-			self.publish("Import Master Data", _("Importing Currencies"), 1, 7)
+			self.publish("Import Master Data", _("Importing Currencies"), 1, 8)
 			create_currencies(self.currencies)
 
-			self.publish("Import Master Data", _("Creating Company and Importing Chart of Accounts"), 2, 7)
+			self.publish("Import Master Data", _("Creating Company and Importing Chart of Accounts"), 2, 8)
 			create_company_and_coa(self.chart_of_accounts, default_currency)
 
-			self.publish("Import Master Data", _("Importing Item Groups, Warehouses and Cost Centers"), 3, 7)
+			self.publish("Import Master Data", _("Importing Item Groups, Warehouses and Cost Centers"), 3, 8)
 			create_item_groups(self.item_groups)
 			create_warehouses(self.warehouses)
 			create_cost_centers(self.cost_centers)
 
-			self.publish("Import Master Data", _("Importing Party Groups, Parties and Addresses"), 4, 7)
+			self.publish("Import Master Data", _("Importing Party Groups, Parties and Addresses"), 4, 8)
 			create_party_groups(getattr(self, "customer_groups", None), getattr(self, "supplier_groups", None))
 			create_parties_and_addresses(self.parties, self.addresses)
 
-			self.publish("Import Master Data", _("Importing UOMs"), 5, 7)
+			self.publish("Import Master Data", _("Importing UOMs"), 5, 8)
 			create_uoms(self.uoms)
 
-			self.publish("Import Master Data", _("Importing Items"), 6, 7)
+			self.publish("Import Master Data", _("Importing Items"), 6, 8)
 			create_items(self.items, self.stock_items_enhanced)
 
-			self.publish("Import Master Data", _("Done"), 7, 7)
+			self.publish("Import Master Data", _("Importing Employees and Payroll Masters"), 7, 8)
+			create_departments_designations_employees(self.employee_groups, self.employees)
+			create_salary_components_if_available(getattr(self, "payheads", None))
+
+			self.publish("Import Master Data", _("Done"), 8, 8)
 
 			self.set_account_defaults()
 			self.is_master_data_imported = 1
 			frappe.db.commit()
 
 		except Exception:
-			self.publish("Import Master Data", _("Process Failed"), -1, 7)
+			self.publish("Import Master Data", _("Process Failed"), -1, 8)
 			frappe.db.rollback()
 			self.log()
 
@@ -2527,36 +2704,236 @@ class TallyMigration(Document):
 			frappe.log_error(frappe.get_traceback(), "Tally Opening Journal Entry Import Failed")
 			raise
 
+	def get_default_erpnext_doctype_for_tally_voucher(self, tally_voucher_type, has_inventory_entries=False):
+		voucher_type = str(tally_voucher_type or "").strip().lower()
+
+		default_map = {
+			"journal": "Journal Entry",
+			"receipt": "Journal Entry",
+			"payment": "Journal Entry",
+			"contra": "Journal Entry",
+			"sales": "Sales Invoice",
+			"einvoice": "Sales Invoice",
+			"e-invoice": "Sales Invoice",
+			"purchase": "Purchase Invoice",
+			"credit note": "Sales Invoice",
+			"debit note": "Purchase Invoice",
+			"delivery note": "Delivery Note",
+			"receipt note": "Purchase Receipt",
+			"sales order": "Sales Order",
+			"purchase order": "Purchase Order",
+			"quotation": "Quotation",
+			"quote": "Quotation",
+			"sales quote": "Quotation",
+			"stock journal": "Stock Entry",
+		}
+
+		if voucher_type in default_map:
+			return default_map[voucher_type]
+
+		if has_inventory_entries:
+			return "Sales Invoice"
+
+		return "Journal Entry"
+
+	def get_voucher_type_mapping_key(self, tally_voucher_type, tally_persisted_view=None):
+		return (
+			str(tally_voucher_type or "").strip(),
+			str(tally_persisted_view or "").strip(),
+		)
+
+	def build_voucher_type_mappings_from_daybook(self, collection):
+		mappings = []
+		seen = set()
+
+		def get_child_text(tag, child_name):
+			child = tag.find(child_name)
+			return child.get_text(strip=True) if child else None
+
+		for voucher in collection.find_all("VOUCHER"):
+			is_cancelled = get_child_text(voucher, "ISCANCELLED")
+			if str(is_cancelled or "").strip().lower() == "yes":
+				continue
+
+			tally_voucher_type = (
+				voucher.get("VCHTYPE")
+				or get_child_text(voucher, "VOUCHERTYPENAME")
+				or ""
+			).strip()
+
+			if not tally_voucher_type:
+				continue
+
+			tally_persisted_view = (
+				voucher.get("OBJVIEW")
+				or get_child_text(voucher, "PERSISTEDVIEW")
+				or ""
+			).strip()
+
+			key = self.get_voucher_type_mapping_key(tally_voucher_type, tally_persisted_view)
+			if key in seen:
+				continue
+
+			seen.add(key)
+
+			inventory_entries = (
+				voucher.find_all("INVENTORYENTRIES.LIST")
+				+ voucher.find_all("ALLINVENTORYENTRIES.LIST")
+				+ voucher.find_all("INVENTORYENTRIESIN.LIST")
+				+ voucher.find_all("INVENTORYENTRIESOUT.LIST")
+			)
+
+			erpnext_doctype = self.get_default_erpnext_doctype_for_tally_voucher(
+				tally_voucher_type,
+				has_inventory_entries=bool(inventory_entries),
+			)
+
+			lower_type = tally_voucher_type.lower()
+
+			mappings.append(
+				{
+					"doctype": "Tally Voucher Type Mapping",
+					"tally_voucher_type": tally_voucher_type,
+					"tally_persisted_view": tally_persisted_view,
+					"erpnext_doctype": erpnext_doctype,
+					"erpnext_voucher_type": "Material Transfer" if erpnext_doctype == "Stock Entry" else "",
+					"import_with_inventory": 1 if inventory_entries else 0,
+					"is_return": 1 if lower_type in ("credit note", "debit note") else 0,
+					"enabled": 1,
+				}
+			)
+
+		mappings.sort(
+			key=lambda row: (
+				row.get("tally_voucher_type") or "",
+				row.get("tally_persisted_view") or "",
+			)
+		)
+
+		return mappings
+
+	def upsert_voucher_type_mappings_from_daybook(self, collection):
+		existing_rows = {}
+		for row in self.get("voucher_type_mappings") or []:
+			key = self.get_voucher_type_mapping_key(
+				row.get("tally_voucher_type"),
+				row.get("tally_persisted_view"),
+			)
+			existing_rows[key] = row
+
+		discovered_rows = self.build_voucher_type_mappings_from_daybook(collection)
+
+		for discovered in discovered_rows:
+			key = self.get_voucher_type_mapping_key(
+				discovered.get("tally_voucher_type"),
+				discovered.get("tally_persisted_view"),
+			)
+
+			if key in existing_rows:
+				continue
+
+			self.append("voucher_type_mappings", discovered)
+
+
+
 	def _process_day_book_data(self):
+		def get_inventory_entries(voucher):
+			return (
+				voucher.find_all("INVENTORYENTRIES.LIST")
+				+ voucher.find_all("ALLINVENTORYENTRIES.LIST")
+				+ voucher.find_all("INVENTORYENTRIESIN.LIST")
+				+ voucher.find_all("INVENTORYENTRIESOUT.LIST")
+			)
+
+		def get_voucher_type_mapping(voucher):
+			tally_voucher_type = (
+				voucher.get("VCHTYPE")
+				or get_child_text(voucher, "VOUCHERTYPENAME")
+				or ""
+			).strip()
+
+			tally_persisted_view = (
+				voucher.get("OBJVIEW")
+				or get_child_text(voucher, "PERSISTEDVIEW")
+				or ""
+			).strip()
+
+			mapping_by_key = {}
+			for row in self.get("voucher_type_mappings") or []:
+				key = self.get_voucher_type_mapping_key(
+					row.get("tally_voucher_type"),
+					row.get("tally_persisted_view"),
+				)
+				mapping_by_key[key] = row
+
+			return mapping_by_key.get(
+				self.get_voucher_type_mapping_key(tally_voucher_type, tally_persisted_view)
+			) or mapping_by_key.get(
+				self.get_voucher_type_mapping_key(tally_voucher_type, "")
+			)
+
+		def get_tally_cost_center_from_allocations(tag):
+			for category_allocation in tag.find_all("CATEGORYALLOCATIONS.LIST"):
+				for cost_center_allocation in category_allocation.find_all("COSTCENTREALLOCATIONS.LIST"):
+					cost_center_name = get_child_text(cost_center_allocation, "NAME")
+					if cost_center_name:
+						return encode_company_abbr(cost_center_name, self.erpnext_company)
+
+			return self.default_cost_center
+
+		def get_voucher_converter(voucher):
+			mapping = get_voucher_type_mapping(voucher)
+			inventory_entries = get_inventory_entries(voucher)
+
+			if mapping and not mapping.get("enabled"):
+				return None, None
+
+			erpnext_doctype = mapping.get("erpnext_doctype") if mapping else None
+
+			if not erpnext_doctype:
+				voucher_type = voucher.VOUCHERTYPENAME.string.strip()
+				if voucher_type not in ["Journal", "Receipt", "Payment", "Contra"] and inventory_entries:
+					erpnext_doctype = "Sales Invoice"
+				else:
+					erpnext_doctype = "Journal Entry"
+
+			if erpnext_doctype == "Journal Entry":
+				return voucher_to_journal_entry, erpnext_doctype
+
+			if erpnext_doctype in ["Sales Invoice", "Purchase Invoice"]:
+				return voucher_to_invoice, erpnext_doctype
+
+			if erpnext_doctype in [
+				"Delivery Note",
+				"Purchase Receipt",
+				"Sales Order",
+				"Purchase Order",
+				"Quotation",
+				"Stock Entry",
+			]:
+				return voucher_to_inventory_document, erpnext_doctype
+
+			return None, erpnext_doctype
+
 		def get_vouchers(collection):
 			vouchers = []
 			for voucher in collection.find_all("VOUCHER"):
 				if voucher.ISCANCELLED.string.strip() == "Yes":
 					continue
-				inventory_entries = (
-					voucher.find_all("INVENTORYENTRIES.LIST")
-					+ voucher.find_all("ALLINVENTORYENTRIES.LIST")
-					+ voucher.find_all("INVENTORYENTRIESIN.LIST")
-					+ voucher.find_all("INVENTORYENTRIESOUT.LIST")
-				)
-				if (
-					voucher.VOUCHERTYPENAME.string.strip() not in ["Journal", "Receipt", "Payment", "Contra"]
-					and inventory_entries
-				):
-					function = voucher_to_invoice
-				else:
-					function = voucher_to_journal_entry
+
+				function, erpnext_doctype = get_voucher_converter(voucher)
+				if not function:
+					continue
+
 				try:
-					processed_voucher = function(voucher)
+					processed_voucher = function(voucher, erpnext_doctype)
 					if processed_voucher:
 						vouchers.append(processed_voucher)
-					frappe.db.commit()
 				except Exception:
-					frappe.db.rollback()
 					self.log(voucher)
 			return vouchers
 
-		def voucher_to_journal_entry(voucher):
+		def voucher_to_journal_entry(voucher, erpnext_doctype=None):
 			accounts = []
 			ledger_entries = voucher.find_all("ALLLEDGERENTRIES.LIST") + voucher.find_all(
 				"LEDGERENTRIES.LIST"
@@ -2564,7 +2941,7 @@ class TallyMigration(Document):
 			for entry in ledger_entries:
 				account = {
 					"account": encode_company_abbr(entry.LEDGERNAME.string.strip(), self.erpnext_company),
-					"cost_center": self.default_cost_center,
+					"cost_center": get_tally_cost_center_from_allocations(entry),
 				}
 				if entry.ISPARTYLEDGER.string.strip() == "Yes":
 					party_details = get_party(entry.LEDGERNAME.string.strip())
@@ -2590,22 +2967,104 @@ class TallyMigration(Document):
 			}
 			return journal_entry
 
-		def voucher_to_invoice(voucher):
-			if voucher.VOUCHERTYPENAME.string.strip() in ["Sales", "Credit Note"]:
+		def is_landed_cost_ledger(ledger_name):
+			ledger_name = str(ledger_name or "").strip().lower()
+
+			if not ledger_name:
+				return False
+
+			excluded_keywords = [
+				"vat",
+				"tax",
+				"gst",
+				"cgst",
+				"sgst",
+				"igst",
+				"tds",
+				"tcs",
+				"cess",
+				"round",
+				"discount",
+				"rebate",
+			]
+
+			if any(keyword in ledger_name for keyword in excluded_keywords):
+				return False
+
+			landed_cost_keywords = [
+				"freight",
+				"transport",
+				"shipping",
+				"carriage",
+				"cartage",
+				"clearing",
+				"forwarding",
+				"custom",
+				"customs",
+				"duty",
+				"insurance",
+				"handling",
+				"loading",
+				"unloading",
+				"landing",
+				"landed",
+				"octroi",
+				"port",
+				"terminal",
+				"demurrage",
+			]
+
+			return any(keyword in ledger_name for keyword in landed_cost_keywords)
+
+		def get_purchase_landed_cost_charges(voucher):
+			charges = []
+			ledger_entries = voucher.find_all("ALLLEDGERENTRIES.LIST") + voucher.find_all("LEDGERENTRIES.LIST")
+
+			for entry in ledger_entries:
+				ledger_name = get_child_text(entry, "LEDGERNAME")
+				is_party_ledger = str(get_child_text(entry, "ISPARTYLEDGER") or "").strip().lower()
+				amount_value = get_child_text(entry, "AMOUNT")
+
+				if is_party_ledger == "yes":
+					continue
+
+				if not is_landed_cost_ledger(ledger_name):
+					continue
+
+				try:
+					amount = abs(Decimal(str(amount_value or "0")))
+				except Exception:
+					amount = Decimal("0")
+
+				if not amount:
+					continue
+
+				charges.append(
+					{
+						"expense_account": encode_company_abbr(ledger_name, self.erpnext_company),
+						"description": ledger_name,
+						"amount": str(amount),
+					}
+				)
+
+			return charges
+
+		def voucher_to_invoice(voucher, erpnext_doctype=None):
+			voucher_type = voucher.VOUCHERTYPENAME.string.strip()
+
+			if erpnext_doctype == "Sales Invoice" or voucher_type in ["Sales", "Credit Note"]:
 				doctype = "Sales Invoice"
 				party_field = "customer"
 				account_field = "debit_to"
 				account_name = encode_company_abbr(self.tally_debtors_account, self.erpnext_company)
 				price_list_field = "selling_price_list"
-			elif voucher.VOUCHERTYPENAME.string.strip() in ["Purchase", "Debit Note"]:
+			elif erpnext_doctype == "Purchase Invoice" or voucher_type in ["Purchase", "Debit Note"]:
 				doctype = "Purchase Invoice"
 				party_field = "supplier"
 				account_field = "credit_to"
 				account_name = encode_company_abbr(self.tally_creditors_account, self.erpnext_company)
 				price_list_field = "buying_price_list"
 			else:
-				# Do not handle vouchers other than "Purchase", "Debit Note", "Sales" and "Credit Note"
-				# Do not handle Custom Vouchers either
 				return
 
 			invoice = {
@@ -2623,38 +3082,174 @@ class TallyMigration(Document):
 				"disable_rounded_total": 1,
 				"company": self.erpnext_company,
 			}
+
+			if doctype == "Purchase Invoice":
+				landed_cost_charges = get_purchase_landed_cost_charges(voucher)
+				if landed_cost_charges:
+					invoice["_tally_landed_cost_charges"] = landed_cost_charges
+
 			return invoice
 
-		def get_voucher_items(voucher, doctype):
-			inventory_entries = (
-				voucher.find_all("INVENTORYENTRIES.LIST")
-				+ voucher.find_all("ALLINVENTORYENTRIES.LIST")
-				+ voucher.find_all("INVENTORYENTRIESIN.LIST")
-				+ voucher.find_all("INVENTORYENTRIESOUT.LIST")
-			)
-			if doctype == "Sales Invoice":
-				account_field = "income_account"
-			elif doctype == "Purchase Invoice":
-				account_field = "expense_account"
-			items = []
-			for entry in inventory_entries:
-				qty, uom = entry.ACTUALQTY.string.strip().split()
-				items.append(
-					{
-						"item_code": entry.STOCKITEMNAME.string.strip(),
-						"description": entry.STOCKITEMNAME.string.strip(),
-						"qty": qty.strip(),
-						"uom": uom.strip(),
-						"conversion_factor": 1,
-						"price_list_rate": entry.RATE.string.strip().split("/")[0],
-						"cost_center": self.default_cost_center,
-						"warehouse": self.default_warehouse,
-						account_field: encode_company_abbr(
-							entry.find_all("ACCOUNTINGALLOCATIONS.LIST")[0].LEDGERNAME.string.strip(),
-							self.erpnext_company,
-						),
-					}
+		def voucher_to_inventory_document(voucher, erpnext_doctype=None):
+			doctype = erpnext_doctype
+			items = get_voucher_items(voucher, doctype)
+
+			if not items:
+				return
+
+			voucher_date = parse_tally_daybook_date(voucher.DATE.string.strip())
+
+			document = {
+				"doctype": doctype,
+				"tally_guid": voucher.GUID.string.strip(),
+				"tally_voucher_no": voucher.VOUCHERNUMBER.string.strip() if voucher.VOUCHERNUMBER else "",
+				"company": self.erpnext_company,
+				"items": items,
+			}
+
+			party_name = voucher.PARTYNAME.string.strip() if voucher.PARTYNAME else ""
+
+			if doctype in ["Delivery Note", "Purchase Receipt", "Stock Entry"]:
+				document["posting_date"] = voucher_date
+				document["set_posting_time"] = 1
+
+			if doctype in ["Sales Order", "Purchase Order", "Quotation"]:
+				document["transaction_date"] = voucher_date
+
+			if doctype == "Sales Order":
+				document["delivery_date"] = voucher_date
+
+			if doctype in ["Delivery Note", "Sales Order"]:
+				document["customer"] = party_name
+			elif doctype in ["Purchase Receipt", "Purchase Order"]:
+				document["supplier"] = party_name
+			elif doctype == "Quotation":
+				document["quotation_to"] = "Customer"
+				document["party_name"] = party_name
+			elif doctype == "Stock Entry":
+				mapping = get_voucher_type_mapping(voucher)
+				document["stock_entry_type"] = (
+					mapping.get("erpnext_voucher_type")
+					if mapping and mapping.get("erpnext_voucher_type")
+					else "Material Transfer"
 				)
+
+			return document
+
+		def get_voucher_items(voucher, doctype):
+			inventory_entries = get_inventory_entries(voucher)
+
+			def get_entry_text(entry, fieldname, default=""):
+				child = entry.find(fieldname)
+				return child.get_text(strip=True) if child else default
+
+			def parse_qty_and_uom(value):
+				parts = str(value or "").strip().split()
+				if not parts:
+					return "0", ""
+
+				qty = parts[0].strip()
+				uom = " ".join(parts[1:]).strip() if len(parts) > 1 else ""
+				return qty, uom
+
+			def get_entry_rate(entry):
+				rate = get_entry_text(entry, "RATE")
+				if not rate:
+					return "0"
+
+				return rate.split("/")[0].strip()
+
+			def get_entry_account(entry):
+				allocations = entry.find_all("ACCOUNTINGALLOCATIONS.LIST")
+				if not allocations:
+					return ""
+
+				ledger_name = get_entry_text(allocations[0], "LEDGERNAME")
+				if not ledger_name:
+					return ""
+
+				return encode_company_abbr(ledger_name, self.erpnext_company)
+
+			def get_entry_cost_center(entry):
+				allocations = entry.find_all("ACCOUNTINGALLOCATIONS.LIST")
+				for allocation in allocations:
+					for category_allocation in allocation.find_all("CATEGORYALLOCATIONS.LIST"):
+						for cost_center_allocation in category_allocation.find_all("COSTCENTREALLOCATIONS.LIST"):
+							cost_center_name = get_entry_text(cost_center_allocation, "NAME")
+							if cost_center_name:
+								return encode_company_abbr(cost_center_name, self.erpnext_company)
+
+				return self.default_cost_center
+
+			def should_set_income_or_expense_account(target_doctype):
+				return target_doctype in ["Sales Invoice", "Purchase Invoice"]
+
+			items = []
+
+			for entry in inventory_entries:
+				actual_qty, uom = parse_qty_and_uom(get_entry_text(entry, "ACTUALQTY"))
+				billed_qty, billed_uom = parse_qty_and_uom(get_entry_text(entry, "BILLEDQTY"))
+				qty = billed_qty if billed_qty and billed_qty != "0" else actual_qty
+				uom = billed_uom or uom
+
+				item = {
+					"item_code": get_entry_text(entry, "STOCKITEMNAME"),
+					"description": get_entry_text(entry, "STOCKITEMNAME"),
+					"qty": str(abs(Decimal(qty or "0"))),
+					"uom": uom,
+					"conversion_factor": 1,
+					"price_list_rate": get_entry_rate(entry),
+					"cost_center": get_entry_cost_center(entry),
+				}
+
+				if doctype in [
+					"Sales Invoice",
+					"Purchase Invoice",
+					"Delivery Note",
+					"Purchase Receipt",
+					"Sales Order",
+					"Purchase Order",
+					"Quotation",
+				]:
+					item["warehouse"] = self.default_warehouse
+
+				if doctype in ["Sales Invoice", "Delivery Note", "Sales Order", "Quotation"]:
+					item["rate"] = item["price_list_rate"]
+
+				if doctype == "Sales Order":
+					item["delivery_date"] = parse_tally_daybook_date(voucher.DATE.string.strip())
+
+				if doctype in ["Purchase Invoice", "Purchase Receipt", "Purchase Order"]:
+					item["rate"] = item["price_list_rate"]
+
+				if doctype == "Purchase Order":
+					item["schedule_date"] = parse_tally_daybook_date(voucher.DATE.string.strip())
+
+				if should_set_income_or_expense_account(doctype):
+					account = get_entry_account(entry)
+					if account:
+						if doctype == "Sales Invoice":
+							item["income_account"] = account
+						elif doctype == "Purchase Invoice":
+							item["expense_account"] = account
+
+				if doctype == "Stock Entry":
+					qty_decimal = Decimal(actual_qty or "0")
+					entry_name = str(entry.name or "").upper()
+
+					item.pop("warehouse", None)
+					item.pop("price_list_rate", None)
+					item.pop("rate", None)
+					item["qty"] = str(abs(qty_decimal))
+
+					if "OUT" in entry_name or qty_decimal < 0:
+						item["s_warehouse"] = self.default_warehouse
+					else:
+						item["t_warehouse"] = self.default_warehouse
+
+				if item.get("item_code") and Decimal(item.get("qty") or "0") != 0:
+					items.append(item)
+
 			return items
 
 		def get_voucher_taxes(voucher):
@@ -2671,7 +3266,7 @@ class TallyMigration(Document):
 							"account_head": tax_account,
 							"description": tax_account,
 							"tax_amount": entry.AMOUNT.string.strip(),
-							"cost_center": self.default_cost_center,
+							"cost_center": get_tally_cost_center_from_allocations(entry),
 						}
 					)
 			return taxes
@@ -2752,6 +3347,7 @@ class TallyMigration(Document):
 			collection = self.get_collection(self.day_book_data)
 
 			self.publish("Process Day Book Data", _("Processing Vouchers"), 2, 3)
+			self.upsert_voucher_type_mappings_from_daybook(collection)
 			vouchers = get_vouchers(collection)
 			vouchers = normalize_daybook_vouchers(collection, vouchers)
 
@@ -2789,7 +3385,18 @@ class TallyMigration(Document):
 		def create_custom_fields():
 			_create_custom_fields(
 				{
-					("Journal Entry", "Purchase Invoice", "Sales Invoice"): [
+					(
+						"Journal Entry",
+						"Purchase Invoice",
+						"Sales Invoice",
+						"Delivery Note",
+						"Purchase Receipt",
+						"Sales Order",
+						"Purchase Order",
+						"Quotation",
+						"Stock Entry",
+						"Landed Cost Voucher",
+					): [
 						{
 							"fieldtype": "Data",
 							"fieldname": "tally_guid",
@@ -2801,6 +3408,30 @@ class TallyMigration(Document):
 							"fieldname": "tally_voucher_no",
 							"read_only": 1,
 							"label": "Tally Voucher Number",
+						},
+						{
+							"fieldtype": "Data",
+							"fieldname": "tally_voucher_type",
+							"read_only": 1,
+							"label": "Tally Voucher Type",
+						},
+						{
+							"fieldtype": "Data",
+							"fieldname": "tally_persisted_view",
+							"read_only": 1,
+							"label": "Tally Persisted View",
+						},
+						{
+							"fieldtype": "Data",
+							"fieldname": "tally_voucher_number",
+							"read_only": 1,
+							"label": "Tally Voucher Number Raw",
+						},
+						{
+							"fieldtype": "Data",
+							"fieldname": "tally_date",
+							"read_only": 1,
+							"label": "Tally Date Raw",
 						},
 					]
 				}
@@ -2881,16 +3512,85 @@ class TallyMigration(Document):
 		vouchers = json.loads(vouchers_file.get_content())
 		chunk = vouchers[start : start + VOUCHER_CHUNK_SIZE]
 
+		def create_landed_cost_voucher_if_required(voucher_doc, landed_cost_charges, source_voucher):
+			if voucher_doc.doctype != "Purchase Invoice":
+				return
+
+			if not landed_cost_charges:
+				return
+
+			if not frappe.db.exists("DocType", "Landed Cost Voucher"):
+				return
+
+			lcv_guid = ""
+			if source_voucher.get("tally_guid"):
+				lcv_guid = str(source_voucher.get("tally_guid")) + "-LCV"
+
+			if lcv_guid and frappe.db.exists("Landed Cost Voucher", {"tally_guid": lcv_guid}):
+				return
+
+			taxes = []
+			for charge in landed_cost_charges:
+				try:
+					amount = abs(Decimal(str(charge.get("amount") or "0")))
+				except Exception:
+					amount = Decimal("0")
+
+				if not amount:
+					continue
+
+				taxes.append(
+					{
+						"expense_account": charge.get("expense_account"),
+						"description": charge.get("description") or charge.get("expense_account"),
+						"amount": str(amount),
+					}
+				)
+
+			if not taxes:
+				return
+
+			landed_cost_voucher = frappe.get_doc(
+				{
+					"doctype": "Landed Cost Voucher",
+					"company": self.erpnext_company,
+					"posting_date": voucher_doc.posting_date,
+					"distribute_charges_based_on": "Amount",
+					"purchase_receipts": [
+						{
+							"receipt_document_type": "Purchase Invoice",
+							"receipt_document": voucher_doc.name,
+						}
+					],
+					"taxes": taxes,
+					"tally_guid": lcv_guid,
+					"tally_voucher_no": source_voucher.get("tally_voucher_no"),
+					"tally_voucher_type": source_voucher.get("tally_voucher_type"),
+					"tally_persisted_view": source_voucher.get("tally_persisted_view"),
+					"tally_voucher_number": source_voucher.get("tally_voucher_number"),
+					"tally_date": source_voucher.get("tally_date"),
+				}
+			)
+
+			landed_cost_voucher.flags.ignore_mandatory = True
+			landed_cost_voucher.get_items_from_purchase_receipts()
+			landed_cost_voucher.insert(ignore_permissions=True)
+			landed_cost_voucher.submit()
+
 		for index, voucher in enumerate(chunk, start=start):
+			voucher_doc = None
+			landed_cost_charges = voucher.pop("_tally_landed_cost_charges", []) or []
+
 			try:
 				voucher_doc = frappe.get_doc(voucher)
 				voucher_doc.insert()
 				voucher_doc.submit()
+				create_landed_cost_voucher_if_required(voucher_doc, landed_cost_charges, voucher)
 				self.publish("Importing Vouchers", _("{} of {}").format(index, total), index, total)
 				frappe.db.commit()
 			except Exception:
 				frappe.db.rollback()
-				self.log(voucher_doc)
+				self.log(voucher_doc or voucher)
 
 		if is_last:
 			self.status = ""
