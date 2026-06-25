@@ -37,6 +37,7 @@
   "warehouses",
   "employee_groups",
   "employees",
+  "payheads",
   "ledger_opening_balances",
   "stock_items_enhanced",
   "item_opening_balances",
@@ -55,6 +56,8 @@
   "column_break_27",
   "is_day_book_data_processed",
   "is_day_book_data_imported",
+  "voucher_mapping_section",
+  "voucher_type_mappings",
   "import_log_section",
   "failed_import_log",
   "fixed_errors_log",
@@ -385,11 +388,31 @@
    "label": "Opening Journal Entry",
    "options": "Journal Entry",
    "read_only": 1
+  },
+  {
+   "depends_on": "eval:doc.is_day_book_data_processed==1",
+   "fieldname": "voucher_mapping_section",
+   "fieldtype": "Section Break",
+   "label": "Voucher Type Mapping"
+  },
+  {
+   "description": "Map each Tally voucher type found in processed Day Book Data to the ERPNext transaction type that should be created during import.",
+   "fieldname": "voucher_type_mappings",
+   "fieldtype": "Table",
+   "label": "Voucher Type Mappings",
+   "options": "Tally Voucher Type Mapping",
+   "read_only_depends_on": "eval:doc.is_day_book_data_imported==1"
+  },
+  {
+   "fieldname": "payheads",
+   "fieldtype": "Attach",
+   "label": "Payheads",
+   "read_only": 1
   }
  ],
  "grid_page_length": 50,
  "links": [],
- "modified": "2026-06-22 00:00:00.000000",
+ "modified": "2026-06-24 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "Maas Tally Migration",
  "name": "Tally Migration",

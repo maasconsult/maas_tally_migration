@@ -94,6 +94,13 @@ frappe.ui.form.on("Tally Migration", {
             }
         }
 
+        if (frm.doc.day_book_data && frm.doc.is_day_book_data_processed && !frm.doc.is_day_book_data_imported) {
+            frm.dashboard.set_headline_alert(
+                __("Review Voucher Type Mappings before importing Day Book Data."),
+                "orange"
+            );
+        }
+
         if (frm.doc.day_book_data && !frm.doc.is_day_book_data_imported) {
             if (frm.doc.is_day_book_data_processed) {
                 if (frm.doc.status != "Importing Day Book Data") {
@@ -122,19 +129,28 @@ frappe.ui.form.on("Tally Migration", {
 
     add_button: function (frm, label, method) {
         frm.add_custom_button(label, () => {
-            frm.dashboard.show_progress(label, 1, __("Queued"));
-            frappe.show_alert({
-                message: __("{0} queued. Progress will appear above the form.", [label]),
-                indicator: "blue",
-            });
+            const queue_method = () => {
+                frm.dashboard.show_progress(label, 1, __("Queued"));
+                frappe.show_alert({
+                    message: __("{0} queued. Progress will appear above the form.", [label]),
+                    indicator: "blue",
+                });
 
-            frm.call({
-                doc: frm.doc,
-                method: method,
-                freeze: false,
-            }).then(() => {
-                frm.reload_doc();
-            });
+                frm.call({
+                    doc: frm.doc,
+                    method: method,
+                    freeze: false,
+                }).then(() => {
+                    frm.reload_doc();
+                });
+            };
+
+            if (method === "import_day_book_data" && frm.is_dirty()) {
+                frm.save().then(queue_method);
+                return;
+            }
+
+            queue_method();
         });
     },
 
