@@ -1667,208 +1667,303 @@ class TallyMigration(Document):
 
 
 		def create_party_groups(customer_groups_file_url, supplier_groups_file_url):
-			def create_customer_groups(customer_groups):
-				pending = []
+		        def create_customer_groups(customer_groups):
+		                customer_group_names = {
+		                        row.get("customer_group_name")
+		                        for row in customer_groups
+		                        if row.get("customer_group_name") and row.get("customer_group_name") != "All Customer Groups"
+		                }
 
-				for row in customer_groups:
-					group_name = row.get("customer_group_name")
-					if not group_name:
-						continue
+		                parent_group_names = {
+		                        row.get("parent_customer_group")
+		                        for row in customer_groups
+		                        if row.get("parent_customer_group")
+		                        and row.get("parent_customer_group") != "All Customer Groups"
+		                        and row.get("parent_customer_group") != row.get("customer_group_name")
+		                }
 
-					if group_name == "All Customer Groups":
-						continue
+		                pending = [
+		                        row
+		                        for row in customer_groups
+		                        if row.get("customer_group_name")
+		                        and row.get("customer_group_name") != "All Customer Groups"
+		                ]
 
-					pending.append(row)
+		                max_rounds = len(pending) + 5
 
-				max_rounds = len(pending) + 5
+		                for _round in range(max_rounds):
+		                        if not pending:
+		                                break
 
-				for _round in range(max_rounds):
-					if not pending:
-						break
+		                        still_pending = []
 
-					still_pending = []
+		                        for row in pending:
+		                                group_name = row.get("customer_group_name")
+		                                parent_group = row.get("parent_customer_group") or "All Customer Groups"
+		                                is_group = 1 if group_name in parent_group_names else 0
 
-					for row in pending:
-						group_name = row.get("customer_group_name")
-						parent_group = row.get("parent_customer_group") or "All Customer Groups"
+		                                if parent_group == group_name:
+		                                        parent_group = "All Customer Groups"
 
-						if frappe.db.exists("Customer Group", group_name):
-							continue
+		                                if not frappe.db.exists("Customer Group", parent_group):
+		                                        if parent_group in customer_group_names:
+		                                                still_pending.append(row)
+		                                                continue
 
-						if parent_group == group_name:
-							parent_group = "All Customer Groups"
+		                                        parent_group = "All Customer Groups"
 
-						if not frappe.db.exists("Customer Group", parent_group):
-							if any(p.get("customer_group_name") == parent_group for p in pending):
-								still_pending.append(row)
-								continue
+		                                try:
+		                                        if frappe.db.exists("Customer Group", group_name):
+		                                                frappe.db.set_value("Customer Group", group_name, "is_group", is_group)
+		                                                continue
 
-							parent_group = "All Customer Groups"
+		                                        doc = frappe.get_doc(
+		                                                {
+		                                                        "doctype": "Customer Group",
+		                                                        "customer_group_name": group_name,
+		                                                        "parent_customer_group": parent_group,
+		                                                        "is_group": is_group,
+		                                                }
+		                                        )
+		                                        doc.insert(ignore_permissions=True)
+		                                except frappe.DuplicateEntryError:
+		                                        frappe.clear_messages()
+		                                except Exception:
+		                                        self.log(row)
 
-						doc = frappe.get_doc(
-							{
-								"doctype": "Customer Group",
-								"customer_group_name": group_name,
-								"parent_customer_group": parent_group,
-								"is_group": 1,
-							}
-						)
+		                        if len(still_pending) == len(pending):
+		                                for row in still_pending:
+		                                        group_name = row.get("customer_group_name")
+		                                        if not group_name:
+		                                                continue
 
-						try:
-							doc.insert(ignore_permissions=True)
-						except frappe.DuplicateEntryError:
-							pass
-						except Exception:
-							self.log(doc)
+		                                        try:
+		                                                if frappe.db.exists("Customer Group", group_name):
+		                                                        frappe.db.set_value("Customer Group", group_name, "is_group", 0)
+		                                                        continue
 
-					if len(still_pending) == len(pending):
-						for row in still_pending:
-							group_name = row.get("customer_group_name")
-							if not group_name or frappe.db.exists("Customer Group", group_name):
-								continue
+		                                                doc = frappe.get_doc(
+		                                                        {
+		                                                                "doctype": "Customer Group",
+		                                                                "customer_group_name": group_name,
+		                                                                "parent_customer_group": "All Customer Groups",
+		                                                                "is_group": 0,
+		                                                        }
+		                                                )
+		                                                doc.insert(ignore_permissions=True)
+		                                        except Exception:
+		                                                self.log(row)
 
-							doc = frappe.get_doc(
-								{
-									"doctype": "Customer Group",
-									"customer_group_name": group_name,
-									"parent_customer_group": "All Customer Groups",
-									"is_group": 1,
-								}
-							)
+		                                break
 
-							try:
-								doc.insert(ignore_permissions=True)
-							except Exception:
-								self.log(doc)
+		                        pending = still_pending
 
-						break
+		        def create_supplier_groups(supplier_groups):
+		                supplier_group_names = {
+		                        row.get("supplier_group_name")
+		                        for row in supplier_groups
+		                        if row.get("supplier_group_name") and row.get("supplier_group_name") != "All Supplier Groups"
+		                }
 
-					pending = still_pending
+		                parent_group_names = {
+		                        row.get("parent_supplier_group")
+		                        for row in supplier_groups
+		                        if row.get("parent_supplier_group")
+		                        and row.get("parent_supplier_group") != "All Supplier Groups"
+		                        and row.get("parent_supplier_group") != row.get("supplier_group_name")
+		                }
 
-			def create_supplier_groups(supplier_groups):
-				pending = []
+		                pending = [
+		                        row
+		                        for row in supplier_groups
+		                        if row.get("supplier_group_name")
+		                        and row.get("supplier_group_name") != "All Supplier Groups"
+		                ]
 
-				for row in supplier_groups:
-					group_name = row.get("supplier_group_name")
-					if not group_name:
-						continue
+		                max_rounds = len(pending) + 5
 
-					if group_name == "All Supplier Groups":
-						continue
+		                for _round in range(max_rounds):
+		                        if not pending:
+		                                break
 
-					pending.append(row)
+		                        still_pending = []
 
-				max_rounds = len(pending) + 5
+		                        for row in pending:
+		                                group_name = row.get("supplier_group_name")
+		                                parent_group = row.get("parent_supplier_group") or "All Supplier Groups"
+		                                is_group = 1 if group_name in parent_group_names else 0
 
-				for _round in range(max_rounds):
-					if not pending:
-						break
+		                                if parent_group == group_name:
+		                                        parent_group = "All Supplier Groups"
 
-					still_pending = []
+		                                if not frappe.db.exists("Supplier Group", parent_group):
+		                                        if parent_group in supplier_group_names:
+		                                                still_pending.append(row)
+		                                                continue
 
-					for row in pending:
-						group_name = row.get("supplier_group_name")
-						parent_group = row.get("parent_supplier_group") or "All Supplier Groups"
+		                                        parent_group = "All Supplier Groups"
 
-						if frappe.db.exists("Supplier Group", group_name):
-							continue
+		                                try:
+		                                        if frappe.db.exists("Supplier Group", group_name):
+		                                                frappe.db.set_value("Supplier Group", group_name, "is_group", is_group)
+		                                                continue
 
-						if parent_group == group_name:
-							parent_group = "All Supplier Groups"
+		                                        doc = frappe.get_doc(
+		                                                {
+		                                                        "doctype": "Supplier Group",
+		                                                        "supplier_group_name": group_name,
+		                                                        "parent_supplier_group": parent_group,
+		                                                        "is_group": is_group,
+		                                                }
+		                                        )
+		                                        doc.insert(ignore_permissions=True)
+		                                except frappe.DuplicateEntryError:
+		                                        frappe.clear_messages()
+		                                except Exception:
+		                                        self.log(row)
 
-						if not frappe.db.exists("Supplier Group", parent_group):
-							if any(p.get("supplier_group_name") == parent_group for p in pending):
-								still_pending.append(row)
-								continue
+		                        if len(still_pending) == len(pending):
+		                                for row in still_pending:
+		                                        group_name = row.get("supplier_group_name")
+		                                        if not group_name:
+		                                                continue
 
-							parent_group = "All Supplier Groups"
+		                                        try:
+		                                                if frappe.db.exists("Supplier Group", group_name):
+		                                                        frappe.db.set_value("Supplier Group", group_name, "is_group", 0)
+		                                                        continue
 
-						doc = frappe.get_doc(
-							{
-								"doctype": "Supplier Group",
-								"supplier_group_name": group_name,
-								"parent_supplier_group": parent_group,
-								"is_group": 1,
-							}
-						)
+		                                                doc = frappe.get_doc(
+		                                                        {
+		                                                                "doctype": "Supplier Group",
+		                                                                "supplier_group_name": group_name,
+		                                                                "parent_supplier_group": "All Supplier Groups",
+		                                                                "is_group": 0,
+		                                                        }
+		                                                )
+		                                                doc.insert(ignore_permissions=True)
+		                                        except Exception:
+		                                                self.log(row)
 
-						try:
-							doc.insert(ignore_permissions=True)
-						except frappe.DuplicateEntryError:
-							pass
-						except Exception:
-							self.log(doc)
+		                                break
 
-					if len(still_pending) == len(pending):
-						for row in still_pending:
-							group_name = row.get("supplier_group_name")
-							if not group_name or frappe.db.exists("Supplier Group", group_name):
-								continue
+		                        pending = still_pending
 
-							doc = frappe.get_doc(
-								{
-									"doctype": "Supplier Group",
-									"supplier_group_name": group_name,
-									"parent_supplier_group": "All Supplier Groups",
-									"is_group": 1,
-								}
-							)
+		        customer_groups = load_processed_json(customer_groups_file_url)
+		        supplier_groups = load_processed_json(supplier_groups_file_url)
 
-							try:
-								doc.insert(ignore_permissions=True)
-							except Exception:
-								self.log(doc)
-
-						break
-
-					pending = still_pending
-
-			customer_groups = load_processed_json(customer_groups_file_url)
-			supplier_groups = load_processed_json(supplier_groups_file_url)
-
-			create_customer_groups(customer_groups)
-			create_supplier_groups(supplier_groups)
-
-
+		        create_customer_groups(customer_groups)
+		        create_supplier_groups(supplier_groups)
 		def create_parties_and_addresses(parties_file_url, addresses_file_url):
-			parties = load_processed_json(parties_file_url)
+		        def ensure_leaf_customer_group(group_name):
+		                group_name = group_name or "Tally Customers"
 
-			for party in parties:
-				try:
-					if party.get("doctype") == "Customer":
-						if frappe.db.exists({"doctype": "Customer", "customer_name": party.get("customer_name")}):
-							continue
+		                if frappe.db.exists("Customer Group", group_name):
+		                        if not frappe.db.get_value("Customer Group", group_name, "is_group"):
+		                                return group_name
 
-						customer_group = party.get("customer_group") or "All Customer Groups"
-						if not frappe.db.exists("Customer Group", customer_group):
-							party["customer_group"] = "All Customer Groups"
+		                        leaf_group = f"{group_name} Customers"
+		                        if not frappe.db.exists("Customer Group", leaf_group):
+		                                doc = frappe.get_doc(
+		                                        {
+		                                                "doctype": "Customer Group",
+		                                                "customer_group_name": leaf_group,
+		                                                "parent_customer_group": group_name,
+		                                                "is_group": 0,
+		                                        }
+		                                )
+		                                doc.insert(ignore_permissions=True)
 
-					if party.get("doctype") == "Supplier":
-						if frappe.db.exists({"doctype": "Supplier", "supplier_name": party.get("supplier_name")}):
-							continue
+		                        return leaf_group
 
-						supplier_group = party.get("supplier_group") or "All Supplier Groups"
-						if not frappe.db.exists("Supplier Group", supplier_group):
-							party["supplier_group"] = "All Supplier Groups"
+		                doc = frappe.get_doc(
+		                        {
+		                                "doctype": "Customer Group",
+		                                "customer_group_name": group_name,
+		                                "parent_customer_group": "All Customer Groups",
+		                                "is_group": 0,
+		                        }
+		                )
+		                doc.insert(ignore_permissions=True)
+		                return doc.name
 
-					party_doc = frappe.get_doc(party)
-					party_doc.insert(ignore_permissions=True)
-				except frappe.DuplicateEntryError:
-					pass
-				except Exception:
-					self.log(party)
+		        def ensure_leaf_supplier_group(group_name):
+		                group_name = group_name or "Tally Suppliers"
 
-			addresses = load_processed_json(addresses_file_url)
+		                if frappe.db.exists("Supplier Group", group_name):
+		                        if not frappe.db.get_value("Supplier Group", group_name, "is_group"):
+		                                return group_name
 
-			for address in addresses:
-				try:
-					address_doc = frappe.get_doc(address)
-					address_doc.insert(ignore_permissions=True, ignore_mandatory=True)
-				except frappe.DuplicateEntryError:
-					pass
-				except Exception:
-					self.log(address)
+		                        leaf_group = f"{group_name} Suppliers"
+		                        if not frappe.db.exists("Supplier Group", leaf_group):
+		                                doc = frappe.get_doc(
+		                                        {
+		                                                "doctype": "Supplier Group",
+		                                                "supplier_group_name": leaf_group,
+		                                                "parent_supplier_group": group_name,
+		                                                "is_group": 0,
+		                                        }
+		                                )
+		                                doc.insert(ignore_permissions=True)
 
+		                        return leaf_group
+
+		                doc = frappe.get_doc(
+		                        {
+		                                "doctype": "Supplier Group",
+		                                "supplier_group_name": group_name,
+		                                "parent_supplier_group": "All Supplier Groups",
+		                                "is_group": 0,
+		                        }
+		                )
+		                doc.insert(ignore_permissions=True)
+		                return doc.name
+
+		        parties = load_processed_json(parties_file_url)
+
+		        for party in parties:
+		                try:
+		                        if party.get("doctype") == "Customer":
+		                                if frappe.db.exists({"doctype": "Customer", "customer_name": party.get("customer_name")}):
+		                                        continue
+
+		                                party["customer_group"] = ensure_leaf_customer_group(party.get("customer_group"))
+
+		                        if party.get("doctype") == "Supplier":
+		                                if frappe.db.exists({"doctype": "Supplier", "supplier_name": party.get("supplier_name")}):
+		                                        continue
+
+		                                party["supplier_group"] = ensure_leaf_supplier_group(party.get("supplier_group"))
+
+		                        party_doc = frappe.get_doc(party)
+		                        party_doc.insert(ignore_permissions=True)
+		                except frappe.DuplicateEntryError:
+		                        frappe.clear_messages()
+		                except Exception:
+		                        self.log(party)
+
+		        addresses = load_processed_json(addresses_file_url)
+
+		        for address in addresses:
+		                try:
+		                        valid_links = []
+		                        for link in address.get("links") or []:
+		                                link_doctype = link.get("link_doctype")
+		                                link_name = link.get("link_name")
+
+		                                if link_doctype and link_name and frappe.db.exists(link_doctype, link_name):
+		                                        valid_links.append(link)
+
+		                        if not valid_links:
+		                                continue
+
+		                        address["links"] = valid_links
+		                        address_doc = frappe.get_doc(address)
+		                        address_doc.insert(ignore_permissions=True, ignore_mandatory=True)
+		                except frappe.DuplicateEntryError:
+		                        frappe.clear_messages()
+		                except Exception:
+		                        self.log(address)
 		def create_uoms(uoms_file_url):
 			uoms = load_processed_json(uoms_file_url)
 
@@ -3438,27 +3533,37 @@ class TallyMigration(Document):
 			)
 
 		def create_price_list():
-			if frappe.db.exists("Price List", "Tally Price List"):
-				return "Tally Price List"
+		        price_list_name = "Tally Price List"
+		        currency = frappe.db.get_value("Company", self.erpnext_company, "default_currency")
+		        currency = currency or frappe.db.get_single_value("Global Defaults", "default_currency") or "SAR"
 
-			price_list = frappe.get_doc(
-				{
-					"doctype": "Price List",
-					"price_list_name": "Tally Price List",
-					"selling": 1,
-					"buying": 1,
-					"enabled": 1,
-				}
-			)
+		        if frappe.db.exists("Price List", price_list_name):
+		                price_list = frappe.get_doc("Price List", price_list_name)
+		                price_list.enabled = 1
+		                price_list.selling = 1
+		                price_list.buying = 1
+		                price_list.currency = currency
+		                price_list.save(ignore_permissions=True)
+		                return price_list.name
 
-			try:
-				price_list.insert(ignore_permissions=True)
-			except frappe.DuplicateEntryError:
-				frappe.clear_messages()
-				return "Tally Price List"
+		        price_list = frappe.get_doc(
+		                {
+		                        "doctype": "Price List",
+		                        "price_list_name": price_list_name,
+		                        "selling": 1,
+		                        "buying": 1,
+		                        "enabled": 1,
+		                        "currency": currency,
+		                }
+		        )
 
-			return price_list.name
+		        try:
+		                price_list.insert(ignore_permissions=True)
+		        except frappe.DuplicateEntryError:
+		                frappe.clear_messages()
+		                return price_list_name
 
+		        return price_list.name
 		try:
 			frappe.db.set_value(
 				"Account",
@@ -3577,26 +3682,119 @@ class TallyMigration(Document):
 			landed_cost_voucher.insert(ignore_permissions=True)
 			landed_cost_voucher.submit()
 
+		def ensure_tally_price_list(company):
+		        price_list_name = "Tally Price List"
+		        currency = frappe.db.get_value("Company", company, "default_currency")
+		        currency = currency or frappe.db.get_single_value("Global Defaults", "default_currency") or "SAR"
+
+		        if frappe.db.exists("Price List", price_list_name):
+		                price_list = frappe.get_doc("Price List", price_list_name)
+		                price_list.enabled = 1
+		                price_list.buying = 1
+		                price_list.selling = 1
+		                price_list.currency = currency
+		                price_list.save(ignore_permissions=True)
+		                return price_list.name
+
+		        price_list = frappe.get_doc(
+		                {
+		                        "doctype": "Price List",
+		                        "price_list_name": price_list_name,
+		                        "enabled": 1,
+		                        "buying": 1,
+		                        "selling": 1,
+		                        "currency": currency,
+		                }
+		        )
+		        price_list.insert(ignore_permissions=True)
+		        return price_list.name
+
+		def ensure_stock_received_but_not_billed_account(company):
+		        if not company or not frappe.db.exists("Company", company):
+		                return None
+
+		        existing = frappe.db.get_value("Company", company, "stock_received_but_not_billed")
+		        if existing and frappe.db.exists("Account", existing):
+		                return existing
+
+		        abbr = frappe.db.get_value("Company", company, "abbr")
+		        account_name = f"Stock Received But Not Billed - {abbr}"
+
+		        if frappe.db.exists("Account", account_name):
+		                account = account_name
+		        else:
+		                parent_account = None
+		                for candidate in (
+		                        f"Current Liabilities - {abbr}",
+		                        f"Accounts Payable - {abbr}",
+		                        f"Sundry Creditors - {abbr}",
+		                ):
+		                        if frappe.db.exists("Account", candidate):
+		                                parent_account = candidate
+		                                break
+
+		                if not parent_account:
+		                        parent_account = frappe.db.get_value(
+		                                "Account",
+		                                {
+		                                        "company": company,
+		                                        "root_type": "Liability",
+		                                        "is_group": 1,
+		                                },
+		                                "name",
+		                                order_by="lft asc",
+		                        )
+
+		                if not parent_account:
+		                        return None
+
+		                account_doc = frappe.get_doc(
+		                        {
+		                                "doctype": "Account",
+		                                "account_name": "Stock Received But Not Billed",
+		                                "company": company,
+		                                "parent_account": parent_account,
+		                                "root_type": "Liability",
+		                                "report_type": "Balance Sheet",
+		                                "account_type": "Stock Received But Not Billed",
+		                                "is_group": 0,
+		                        }
+		                )
+
+		                try:
+		                        account_doc.insert(ignore_permissions=True)
+		                        account = account_doc.name
+		                except frappe.DuplicateEntryError:
+		                        frappe.clear_messages()
+		                        account = account_name
+
+		        frappe.db.set_value("Company", company, "stock_received_but_not_billed", account)
+		        return account
 		for index, voucher in enumerate(chunk, start=start):
 			voucher_doc = None
 			landed_cost_charges = voucher.pop("_tally_landed_cost_charges", []) or []
 
 			try:
+				if voucher.get("doctype") == "Purchase Invoice":
+					company = voucher.get("company") or self.erpnext_company
+					voucher["buying_price_list"] = ensure_tally_price_list(company)
+					ensure_stock_received_but_not_billed_account(company)
+
 				voucher_doc = frappe.get_doc(voucher)
-				voucher_doc.insert()
+				voucher_doc.insert(ignore_permissions=True)
 				voucher_doc.submit()
 				create_landed_cost_voucher_if_required(voucher_doc, landed_cost_charges, voucher)
 				self.publish("Importing Vouchers", _("{} of {}").format(index, total), index, total)
-				frappe.db.commit()
+				frappe.db.commit()  # nosemgrep: keep each queued voucher import durable.
 			except Exception:
-				frappe.db.rollback()
+				frappe.db.rollback()  # nosemgrep: rollback only the failed voucher in the long queue.
 				self.log(voucher_doc or voucher)
+				frappe.db.commit()  # nosemgrep: persist the voucher error log before continuing.
 
 		if is_last:
 			self.status = ""
 			self.is_day_book_data_imported = 1
 			self.save()
-			frappe.db.set_value("Price List", "Tally Price List", "enabled", 0)
 		frappe.flags.in_migrate = False
 
 	@frappe.whitelist()
