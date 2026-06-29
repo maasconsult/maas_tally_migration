@@ -163,7 +163,7 @@ class TallyMigration(Document):
 		self.default_cost_center, self.default_round_off_account = frappe.db.get_value(
 			"Company", self.erpnext_company, ["cost_center", "round_off_account"]
 		)
-		self.default_warehouse = frappe.db.get_single_value("Stock Settings", "default_warehouse")
+		self.default_warehouse = self._get_company_default_warehouse()
 
 
 	def _process_master_data(self):
@@ -2383,9 +2383,6 @@ class TallyMigration(Document):
 				if warehouse:
 					return warehouse
 
-				if frappe.db.exists("Warehouse", warehouse_name):
-					return warehouse_name
-
 			if self.default_warehouse:
 				return self.default_warehouse
 
@@ -3189,14 +3186,21 @@ class TallyMigration(Document):
 		def voucher_to_invoice(voucher, erpnext_doctype=None):
 			voucher_type = voucher.VOUCHERTYPENAME.string.strip()
 
-			if erpnext_doctype == "Sales Invoice" or voucher_type in ["Sales", "Credit Note"]:
+			if erpnext_doctype:
+				doctype = erpnext_doctype
+			elif voucher_type in ["Sales", "Credit Note"]:
 				doctype = "Sales Invoice"
+			elif voucher_type in ["Purchase", "Debit Note"]:
+				doctype = "Purchase Invoice"
+			else:
+				return
+
+			if doctype == "Sales Invoice":
 				party_field = "customer"
 				account_field = "debit_to"
 				account_name = encode_company_abbr(self.tally_debtors_account, self.erpnext_company)
 				price_list_field = "selling_price_list"
-			elif erpnext_doctype == "Purchase Invoice" or voucher_type in ["Purchase", "Debit Note"]:
-				doctype = "Purchase Invoice"
+			elif doctype == "Purchase Invoice":
 				party_field = "supplier"
 				account_field = "credit_to"
 				account_name = encode_company_abbr(self.tally_creditors_account, self.erpnext_company)
@@ -3749,6 +3753,50 @@ class TallyMigration(Document):
 			frappe.clear_messages()
 			return frappe.db.get_value("Customer", {"customer_name": customer_name}, "name") or customer_name
 
+	def _resolve_party_docname(self, party_type, party_name):
+		party_name = str(party_name or "").strip()
+		if not party_name:
+			return None
+
+		if party_type == "Customer":
+			return (
+				frappe.db.get_value("Customer", {"customer_name": party_name}, "name")
+				or (party_name if frappe.db.exists("Customer", party_name) else None)
+			)
+
+		if party_type == "Supplier":
+			return (
+				frappe.db.get_value("Supplier", {"supplier_name": party_name}, "name")
+				or (party_name if frappe.db.exists("Supplier", party_name) else None)
+			)
+
+		return None
+
+	def _normalize_voucher_party_references(self, voucher, create_missing_defaults=False):
+		if not isinstance(voucher, dict):
+			return voucher
+
+		voucher = copy.deepcopy(voucher)
+		doctype = voucher.get("doctype")
+
+		if doctype in {"Sales Invoice", "Sales Order", "Delivery Note"}:
+			customer = voucher.get("customer")
+			if doctype == "Sales Invoice" and str(customer or "").strip() == "Cash Sales" and create_missing_defaults:
+				customer = self._ensure_cash_sales_customer()
+			else:
+				customer = self._resolve_party_docname("Customer", customer) or customer
+			voucher["customer"] = customer
+
+		elif doctype in {"Purchase Invoice", "Purchase Order", "Purchase Receipt"}:
+			supplier = voucher.get("supplier")
+			voucher["supplier"] = self._resolve_party_docname("Supplier", supplier) or supplier
+
+		elif doctype == "Quotation" and voucher.get("quotation_to") == "Customer":
+			party_name = voucher.get("party_name")
+			voucher["party_name"] = self._resolve_party_docname("Customer", party_name) or party_name
+
+		return voucher
+
 	def _get_round_off_parent_account(self, company):
 		if not company or not frappe.db.exists("Company", company):
 			return None
@@ -3860,6 +3908,36 @@ class TallyMigration(Document):
 		self.default_round_off_account = account
 		return account
 
+	def _get_company_default_warehouse(self):
+		if not self.erpnext_company or not frappe.db.exists("Company", self.erpnext_company):
+			return None
+
+		current_default = frappe.db.get_single_value("Stock Settings", "default_warehouse")
+		if current_default and frappe.db.get_value("Warehouse", current_default, "company") == self.erpnext_company:
+			return current_default
+
+		return frappe.db.get_value(
+			"Warehouse",
+			{
+				"company": self.erpnext_company,
+				"is_group": 0,
+			},
+			"name",
+			order_by="lft asc",
+		)
+
+	def _ensure_company_default_warehouse(self):
+		warehouse = self._get_company_default_warehouse()
+		if warehouse:
+			self.default_warehouse = warehouse
+		return warehouse
+
+	def _fiscal_year_applies_to_company(self, fiscal_year):
+		companies = fiscal_year.get("companies") or []
+		if not companies:
+			return True
+		return self.erpnext_company in companies
+
 	def _validate_day_book_import_prerequisites(self, vouchers=None, create_missing_defaults=False):
 		issues = []
 
@@ -3893,6 +3971,13 @@ class TallyMigration(Document):
 			if must_be_leaf and frappe.db.get_value(doctype, value, "is_group"):
 				issues.append(_("{0} must be a non-group {1}: {2}.").format(label, doctype, value))
 
+		def require_company_link(label, doctype, value):
+			require_link(label, doctype, value, must_be_leaf=True)
+			if value and frappe.db.exists(doctype, value):
+				company = frappe.db.get_value(doctype, value, "company")
+				if company and company != self.erpnext_company:
+					issues.append(_("{0} must belong to company {1}: {2}.").format(label, self.erpnext_company, value))
+
 		if self.erpnext_company:
 			if self.tally_creditors_account:
 				require_link(
@@ -3914,10 +3999,10 @@ class TallyMigration(Document):
 			else:
 				issues.append(_("Set Tally Debtors Account."))
 
-		require_link(_("Default Cost Center"), "Cost Center", self.default_cost_center, must_be_leaf=True)
+		require_company_link(_("Default Cost Center"), "Cost Center", self.default_cost_center)
 		if create_missing_defaults and not self.default_round_off_account:
 			self._ensure_round_off_account(self.erpnext_company)
-		require_link(_("Default Round Off Account"), "Account", self.default_round_off_account, must_be_leaf=True)
+		require_company_link(_("Default Round Off Account"), "Account", self.default_round_off_account)
 
 		warehouse_doctypes = {
 			"Sales Invoice",
@@ -3931,7 +4016,9 @@ class TallyMigration(Document):
 		}
 		needs_warehouse = any(voucher.get("doctype") in warehouse_doctypes for voucher in vouchers)
 		if needs_warehouse:
-			require_link(_("Default Warehouse"), "Warehouse", self.default_warehouse, must_be_leaf=True)
+			if create_missing_defaults:
+				self._ensure_company_default_warehouse()
+			require_company_link(_("Default Warehouse"), "Warehouse", self.default_warehouse)
 
 		needs_cash_sales_customer = any(
 			voucher.get("doctype") == "Sales Invoice"
@@ -3949,6 +4036,45 @@ class TallyMigration(Document):
 					issues.append(_("Create Cash Sales customer: {0}").format(exc))
 			elif not frappe.db.get_value("Customer", {"customer_name": "Cash Sales"}, "name"):
 				issues.append(_("Create Customer Cash Sales for cash-party Sales Invoices."))
+
+		missing_customers = []
+		missing_suppliers = []
+		for row_number, voucher in enumerate(vouchers, start=1):
+			doctype = voucher.get("doctype")
+			if doctype in {"Sales Invoice", "Sales Order", "Delivery Note"}:
+				customer = voucher.get("customer")
+				if customer and not self._resolve_party_docname("Customer", customer):
+					context = self._get_voucher_import_context(voucher)
+					context["row"] = row_number
+					missing_customers.append(context)
+			elif doctype in {"Purchase Invoice", "Purchase Order", "Purchase Receipt"}:
+				supplier = voucher.get("supplier")
+				if supplier and not self._resolve_party_docname("Supplier", supplier):
+					context = self._get_voucher_import_context(voucher)
+					context["row"] = row_number
+					missing_suppliers.append(context)
+			elif doctype == "Quotation" and voucher.get("quotation_to") == "Customer":
+				party_name = voucher.get("party_name")
+				if party_name and not self._resolve_party_docname("Customer", party_name):
+					context = self._get_voucher_import_context(voucher)
+					context["row"] = row_number
+					missing_customers.append(context)
+
+		if missing_customers:
+			examples = "; ".join(self._format_voucher_context(context) for context in missing_customers[:5])
+			issues.append(
+				_("Create or correct Customer masters for Day Book vouchers before import. Examples: {0}").format(
+					examples
+				)
+			)
+
+		if missing_suppliers:
+			examples = "; ".join(self._format_voucher_context(context) for context in missing_suppliers[:5])
+			issues.append(
+				_("Create or correct Supplier masters for Day Book vouchers before import. Examples: {0}").format(
+					examples
+				)
+			)
 
 		invalid_dates = []
 		for row_number, voucher in enumerate(vouchers, start=1):
@@ -4022,11 +4148,18 @@ class TallyMigration(Document):
 		for fiscal_year in fiscal_years:
 			fiscal_year.year_start_date = getdate(fiscal_year.year_start_date)
 			fiscal_year.year_end_date = getdate(fiscal_year.year_end_date)
+			fiscal_year.companies = frappe.db.get_all(
+				"Fiscal Year Company",
+				filters={"parent": fiscal_year.name},
+				pluck="company",
+			)
 
 		return fiscal_years
 
 	def _find_fiscal_year_for_date(self, fiscal_years, posting_date):
 		for fiscal_year in fiscal_years:
+			if not self._fiscal_year_applies_to_company(fiscal_year):
+				continue
 			if fiscal_year.year_start_date <= posting_date <= fiscal_year.year_end_date:
 				return fiscal_year
 
@@ -4048,9 +4181,12 @@ class TallyMigration(Document):
 
 		if frappe.db.exists("Fiscal Year", fiscal_year_name):
 			fiscal_year = frappe.get_doc("Fiscal Year", fiscal_year_name)
+			existing_companies = {row.company for row in fiscal_year.get("companies")}
+			if self.erpnext_company and self.erpnext_company not in existing_companies:
+				fiscal_year.append("companies", {"company": self.erpnext_company})
 			if fiscal_year.disabled:
 				fiscal_year.disabled = 0
-				fiscal_year.save(ignore_permissions=True)
+			fiscal_year.save(ignore_permissions=True)
 			return fiscal_year
 
 		fiscal_year = frappe.get_doc(
@@ -4069,6 +4205,8 @@ class TallyMigration(Document):
 			template_doc = frappe.get_doc("Fiscal Year", template.name)
 			for row in template_doc.get("companies"):
 				fiscal_year.append("companies", {"company": row.company})
+		elif self.erpnext_company:
+			fiscal_year.append("companies", {"company": self.erpnext_company})
 
 		try:
 			fiscal_year.insert(ignore_permissions=True)
@@ -4097,7 +4235,9 @@ class TallyMigration(Document):
 				continue
 
 			regular_fiscal_years = [
-				fiscal_year for fiscal_year in fiscal_years if not fiscal_year.get("is_short_year")
+				fiscal_year
+				for fiscal_year in fiscal_years
+				if not fiscal_year.get("is_short_year") and self._fiscal_year_applies_to_company(fiscal_year)
 			]
 			if not regular_fiscal_years:
 				start_date = getdate(f"{posting_date.year}-01-01")
@@ -4222,6 +4362,8 @@ class TallyMigration(Document):
 			)
 
 		try:
+			self.reload()
+			self.set_account_defaults()
 			vouchers = self._process_day_book_data(raise_on_failure=True)
 			self.set_status("Importing Day Book Data")
 			if not vouchers:
@@ -4358,6 +4500,7 @@ class TallyMigration(Document):
 		failed_vouchers = 0
 		for index, voucher in enumerate(chunk, start=start):
 			voucher_doc = None
+			voucher = self._normalize_voucher_party_references(voucher, create_missing_defaults=True)
 			landed_cost_charges = voucher.pop("_tally_landed_cost_charges", []) or []
 			keep_as_draft = self._is_truthy(voucher.get("tally_is_optional"))
 
@@ -4371,6 +4514,21 @@ class TallyMigration(Document):
 								"Could not prepare Stock Received But Not Billed account for company {0}."
 							).format(company)
 						)
+
+				if voucher.get("doctype") in {"Sales Invoice", "Sales Order", "Delivery Note"}:
+					customer = voucher.get("customer")
+					if customer and not frappe.db.exists("Customer", customer):
+						frappe.throw(_("Customer {0} does not exist. Import the customer master first.").format(customer))
+
+				if voucher.get("doctype") in {"Purchase Invoice", "Purchase Order", "Purchase Receipt"}:
+					supplier = voucher.get("supplier")
+					if supplier and not frappe.db.exists("Supplier", supplier):
+						frappe.throw(_("Supplier {0} does not exist. Import the supplier master first.").format(supplier))
+
+				if voucher.get("doctype") == "Quotation" and voucher.get("quotation_to") == "Customer":
+					party_name = voucher.get("party_name")
+					if party_name and not frappe.db.exists("Customer", party_name):
+						frappe.throw(_("Customer {0} does not exist. Import the customer master first.").format(party_name))
 
 				voucher_doc = frappe.get_doc(voucher)
 				voucher_doc.insert(ignore_permissions=True)
@@ -4406,6 +4564,8 @@ class TallyMigration(Document):
 
 	@frappe.whitelist()
 	def import_day_book_data(self):
+		self.reload()
+		self.set_account_defaults()
 		self._validate_day_book_import_prerequisites()
 		self.set_status("Importing Day Book Data")
 		frappe.enqueue_doc(self.doctype, self.name, "_import_day_book_data", queue="long", timeout=7200)
